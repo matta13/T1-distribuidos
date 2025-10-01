@@ -1,0 +1,90 @@
+# docker-compose.yml
+services:
+  postgres:
+    image: postgres:15
+    container_name: postgres_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+      POSTGRES_DB: mydatabase
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres/schema.sql:/docker-entrypoint-initdb.d/create_schema.sql
+      - ./postgres/data.sql:/docker-entrypoint-initdb.d/data.sql
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - claudio
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d mydatabase"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  redis_cache:
+    image: redis:7-alpine
+    container_name: redis_cache
+    restart: unless-stopped
+    command: >
+      redis-server
+      --maxmemory 2mb
+      --maxmemory-policy allkeys-lfu
+      --save ""
+      --appendonly no
+    ports:
+      - "6379:6379"
+    networks:
+      - claudio
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    networks:
+      - claudio
+
+  api:
+    build: ./api
+    container_name: qa_api
+    restart: unless-stopped
+    env_file:
+      - .env.api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis_cache:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    networks:
+      - claudio
+
+  client:
+    build: ./client
+    container_name: qa_client
+    restart: "no"
+    environment:
+      - API_URL=http://qa_api:8000/ask
+    depends_on:
+      - api
+    stdin_open: true   
+    tty: true
+    networks:
+      - claudio
+
+networks:
+  claudio:
+
+volumes:
+  ollama_data:
+  postgres_data:
