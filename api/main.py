@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import hashlib
 import json
 import os
@@ -10,9 +9,7 @@ import redis
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-# =========================
 # Configuración
-# =========================
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres_db")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "mydatabase")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "admin")
@@ -26,27 +23,24 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
 CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "604800"))  # 7 días
 
-# =========================
 # Conexiones globales
-# =========================
-r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+redis_cliente = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
-_db_conn = None
-def get_db_conn():
-    global _db_conn
-    if _db_conn is None or getattr(_db_conn, "closed", 1) != 0:
-        _db_conn = psycopg2.connect(
+_conexion_db = None
+def obtener_conexion_db():
+    """Obtiene (y mantiene) una conexión global a Postgres."""
+    global _conexion_db
+    if _conexion_db is None or getattr(_conexion_db, "closed", 1) != 0:
+        _conexion_db = psycopg2.connect(
             host=POSTGRES_HOST,
             dbname=POSTGRES_DB,
             user=POSTGRES_USER,
             password=POSTGRES_PASSWORD,
         )
-        _db_conn.autocommit = True
-    return _db_conn
+        _conexion_db.autocommit = True
+    return _conexion_db
 
-# =========================
 # Modelos
-# =========================
 class AskRequest(BaseModel):
     question: str
 
@@ -61,71 +55,66 @@ class AskResponse(BaseModel):
     row: Row
     message: str
 
-# =========================
 # Utilidades
-# =========================
-def normalize_question(q: str) -> str:
-    return " ".join(q.strip().lower().split())
+def normalizar_pregunta(pregunta: str) -> str:
+    return " ".join(pregunta.strip().lower().split())
 
-def cache_key_for(q: str) -> str:
-    norm = normalize_question(q)
-    h = hashlib.sha256(norm.encode("utf-8")).hexdigest()
-    return f"qa:{h}"
+def clave_cache_para(pregunta: str) -> str:
+    normalizada = normalizar_pregunta(pregunta)
+    hash_hex = hashlib.sha256(normalizada.encode("utf-8")).hexdigest()
+    return f"qa:{hash_hex}"
 
-def row_to_message(row: Row) -> str:
+def fila_a_mensaje(fila: Row) -> str:
     return "\n".join([
-        f"Pregunta: {row.title}",
-        f"Respuesta: {row.answer}",
-        f"Score (1-10): {row.score}",
+        f"Pregunta: {fila.title}",
+        f"Respuesta: {fila.answer}",
+        f"Score (1-10): {fila.score}",
     ])
 
-# =========================
 # Redis y Postgres
-# =========================
-def get_from_cache(question: str) -> Optional[Row]:
+def leer_desde_cache(pregunta: str) -> Optional[Row]:
     try:
-        data = r.get(cache_key_for(question))
+        datos = redis_cliente.get(clave_cache_para(pregunta))
     except Exception:
         return None
-    if not data:
+    if not datos:
         return None
     try:
-        return Row(**json.loads(data))
+        return Row(**json.loads(datos))
     except Exception:
         return None
 
-def set_to_cache(question: str, row: Row):
+def escribir_en_cache(pregunta: str, fila: Row):
     try:
-        r.setex(cache_key_for(question), CACHE_TTL_SECONDS, row.model_dump_json())
+        redis_cliente.setex(clave_cache_para(pregunta), CACHE_TTL_SECONDS, fila.model_dump_json())
     except Exception:
         pass
 
-def get_from_db(question: str) -> Optional[Row]:
-    conn = get_db_conn()
-    with conn.cursor() as cur:
-        cur.execute(
+def leer_desde_db(pregunta: str) -> Optional[Row]:
+    conexion = obtener_conexion_db()
+    with conexion.cursor() as cursor:
+        cursor.execute(
             """
             SELECT score, title, body, answer
             FROM querys
             WHERE LOWER(title) = LOWER(%s)
             LIMIT 1
             """,
-            (question,),
+            (pregunta,),
         )
-        res = cur.fetchone()
-        if res:
-            return Row(score=res[0], title=res[1], body=res[2], answer=res[3])
+        resultado = cursor.fetchone()
+        if resultado:
+            return Row(score=resultado[0], title=resultado[1], body=resultado[2], answer=resultado[3])
         return None
 
-def upsert_row(row: Row) -> None:
+def upsert_fila(fila: Row) -> None:
     """
     Si existe una fila con mismo title (case-insensitive) y mismo body (NULL-safe),
     hace UPDATE; si no, INSERT. (Solo 4 columnas)
     """
-    conn = get_db_conn()
-    with conn.cursor() as cur:
-        # UPDATE primero (match por title+body NULL-safe)
-        cur.execute(
+    conexion = obtener_conexion_db()
+    with conexion.cursor() as cursor:
+        cursor.execute(
             """
             UPDATE querys
                SET score = %s,
@@ -137,22 +126,19 @@ def upsert_row(row: Row) -> None:
                      (body = %s)
                    )
             """,
-            (row.score, row.answer, row.body, row.title, row.body, row.body),
+            (fila.score, fila.answer, fila.body, fila.title, fila.body, fila.body),
         )
-        if cur.rowcount == 0:
-            # No había fila igual -> INSERT
-            cur.execute(
+        if cursor.rowcount == 0:
+            cursor.execute(
                 """
                 INSERT INTO querys (score, title, body, answer)
                 VALUES (%s, %s, %s, %s)
                 """,
-                (row.score, row.title, row.body, row.answer),
+                (fila.score, fila.title, fila.body, fila.answer),
             )
 
-# =========================
-# PROMPT (sin triple comillas para evitar indent issues)
-# =========================
-PROMPT_TEMPLATE = (
+# PROMPT 
+PLANTILLA_PROMPT = (
     "Responde la pregunta del usuario y calcula UN solo puntaje final de 1 a 10 considerando internamente:\n"
     "- Exactitud (40%)\n- Integridad (25%)\n- Claridad (20%)\n- Concisión (10%)\n- Utilidad (5%)\n\n"
     "Devuelve EXCLUSIVAMENTE un JSON válido en este FORMATO y ORDEN (sin texto extra):\n"
@@ -161,86 +147,76 @@ PROMPT_TEMPLATE = (
     "Pregunta:\n"
 )
 
-# =========================
 # Llamada a Ollama
-# =========================
-async def ask_ollama(question: str) -> Row:
-    payload = {
+async def consultar_ollama(pregunta: str) -> Row:
+    cuerpo_solicitud = {
         "model": OLLAMA_MODEL,
-        "prompt": f"{PROMPT_TEMPLATE}{question}",
+        "prompt": f"{PLANTILLA_PROMPT}{pregunta}",
         "stream": False,
     }
-    url = f"{OLLAMA_HOST}/api/generate"
-    async with httpx.AsyncClient(timeout=120) as client:
-        resp = await client.post(url, json=payload)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=502, detail=f"Ollama error: {resp.text}")
-        data = resp.json()
-        raw = str(data.get("response", "")).strip()
+    url_ollama = f"{OLLAMA_HOST}/api/generate"
+    async with httpx.AsyncClient(timeout=120) as cliente_http:
+        respuesta = await cliente_http.post(url_ollama, json=cuerpo_solicitud)
+        if respuesta.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Ollama error: {respuesta.text}")
+        datos = respuesta.json()
+        bruto = str(datos.get("response", "")).strip()
 
         parsed = None
         try:
-            parsed = json.loads(raw)
+            parsed = json.loads(bruto)
         except Exception:
-            start = raw.find("["); end = raw.rfind("]")
-            if start != -1 and end != -1 and end > start:
+            inicio = bruto.find("["); fin = bruto.rfind("]")
+            if inicio != -1 and fin != -1 and fin > inicio:
                 try:
-                    parsed = json.loads(raw[start:end+1])
+                    parsed = json.loads(bruto[inicio:fin+1])
                 except Exception:
                     parsed = None
 
         if not isinstance(parsed, list) or len(parsed) != 4:
             raise HTTPException(status_code=502, detail="Formato inesperado desde Ollama: se esperaba [score, question, null, answer]")
-
-        # 0) score entero 1..10
+            
         try:
-            final_score = int(round(float(parsed[0])))
+            puntaje_final = int(round(float(parsed[0])))
         except Exception:
-            final_score = 1
-        final_score = max(1, min(10, final_score))
+            puntaje_final = 1
+        puntaje_final = max(1, min(10, puntaje_final))
+        
+        titulo = pregunta
+        respuesta_texto = str(parsed[3]).strip()
 
-        # 1) pregunta (usamos la original)
-        title = question
+        return Row(score=puntaje_final, title=titulo, body=None, answer=respuesta_texto)
 
-        # 3) answer string
-        answer = str(parsed[3]).strip()
-
-        return Row(score=final_score, title=title, body=None, answer=answer)
-
-# =========================
 # FastAPI
-# =========================
 app = FastAPI(title="QA Orchestrator API", version="1.0.4")
 
 @app.get("/health")
 def health():
     try:
-        r.ping()
-        get_db_conn().cursor().execute("SELECT 1")
-        ok = True
+        redis_cliente.ping()
+        obtener_conexion_db().cursor().execute("SELECT 1")
+        estado_ok = True
     except Exception:
-        ok = False
-    return {"ok": ok}
+        estado_ok = False
+    return {"ok": estado_ok}
 
 @app.post("/ask", response_model=AskResponse)
-async def ask(req: AskRequest):
-    q = req.question.strip()
-    if not q:
+async def ask(solicitud: AskRequest):
+    pregunta = solicitud.question.strip()
+    if not pregunta:
         raise HTTPException(status_code=400, detail="Pregunta vacía")
 
-    # 1) Cache
-    row = get_from_cache(q)
-    if row:
-        return AskResponse(source="cache", row=row, message=row_to_message(row))
+    fila = leer_desde_cache(pregunta)
+    if fila:
+        return AskResponse(source="cache", row=fila, message=fila_a_mensaje(fila))
 
-    # 2) BD
-    row = get_from_db(q)
-    if row:
-        set_to_cache(q, row)
-        return AskResponse(source="db", row=row, message=row_to_message(row))
+    fila = leer_desde_db(pregunta)
+    if fila:
+        escribir_en_cache(pregunta, fila)
+        return AskResponse(source="db", row=fila, message=fila_a_mensaje(fila))
+        
+    fila = await consultar_ollama(pregunta)
+    upsert_fila(fila)
+    escribir_en_cache(pregunta, fila)
+    return AskResponse(source="llm", row=fila, message=fila_a_mensaje(fila))
 
-    # 3) LLM
-    row = await ask_ollama(q)
-    upsert_row(row)
-    set_to_cache(q, row)
-    return AskResponse(source="llm", row=row, message=row_to_message(row))
