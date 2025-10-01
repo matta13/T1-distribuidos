@@ -11,7 +11,6 @@ def main():
                         help="Pregunta a enviar; si no se pasa, se pedirá por teclado")
     args = parser.parse_args()
 
-    # Soporte UTF-8 en Windows
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except Exception:
@@ -45,3 +44,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
