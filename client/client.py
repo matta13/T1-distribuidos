@@ -3,6 +3,8 @@ import sys
 import argparse
 import httpx
 
+API = "http://qa_api:8000/ask"
+
 def main():
     parser = argparse.ArgumentParser(description="Cliente de Preguntas y Respuestas (imprime puntaje y respuesta)")
     parser.add_argument("--api", default=os.getenv("API_URL", "http://qa_api:8000/ask"),
@@ -44,4 +46,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
