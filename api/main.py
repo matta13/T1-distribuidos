@@ -21,7 +21,7 @@ REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://ollama:11434")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
-CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "604800"))  # 7 días
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "20"))  
 
 # Conexiones globales
 redis_cliente = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
@@ -219,4 +219,5 @@ async def ask(solicitud: AskRequest):
     upsert_fila(fila)
     escribir_en_cache(pregunta, fila)
     return AskResponse(source="llm", row=fila, message=fila_a_mensaje(fila))
+
 
